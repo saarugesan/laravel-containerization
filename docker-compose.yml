@@ -1,0 +1,17 @@
+services:
+  csp-dashboard-app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: csp-dashboard-app
+    environment:
+          - SERVER_NAME=:80        # Disables HTTPS
+          - OCTANE_SERVER=frankenphp
+          - WATCH_FILES=true
+    ports:
+      - "8080:80"
+      - "443:443"
+      - "443:443/udp"
+      - "5173:5173"
+    volumes:
+      - ./src:/var/www

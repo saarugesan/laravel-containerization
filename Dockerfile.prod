@@ -1,0 +1,201 @@
+# ==========================================
+# === FRONTEND ASSET BUILD STAGE (Node) ===
+# ==========================================
+FROM node:24.6.0-bookworm-slim AS frontend
+
+# # Accept build arguments for Vite environment variables
+# ARG VITE_API_URL
+# ARG VITE_APP_NAME
+# # Add any other VITE_* variables you need here
+
+# # Set them as environment variables for the build
+# ENV VITE_API_URL=${VITE_API_URL}
+# ENV VITE_APP_NAME=${VITE_APP_NAME}
+
+WORKDIR /home/node
+
+# Install JS deps and build Vite assets
+COPY ./src/package*.json ./
+RUN npm ci
+
+COPY ./src/vite.config.ts ./
+COPY ./src/tsconfig.json ./
+COPY ./src/components.json ./
+COPY ./src/resources ./resources
+COPY ./src/public ./public
+
+RUN npm run build
+
+
+# ==========================================
+# === PRODUCTION STAGE (FrankenPHP + Laravel Octane) ===
+# ==========================================
+FROM dunglas/frankenphp:1-php8.3-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV OCTANE_BINARY=/usr/local/bin/frankenphp
+ENV OCTANE_SERVER=frankenphp
+ENV TZ=Asia/Singapore
+
+ARG APP_VERSION=1.0.0
+ENV APP_VERSION=$APP_VERSION
+
+WORKDIR /var/www
+
+# ---- Install system dependencies and PHP extensions ----
+RUN apt-get update && apt-get install -y \
+    curl \
+    gnupg \
+    unzip \
+    cron \
+    supervisor \
+    vim \
+    telnet \
+    iputils-ping \
+    net-tools \
+    tzdata \
+    && install-php-extensions \
+    mbstring \
+    xml \
+    curl \
+    zip \
+    gd \
+    bcmath \
+    intl \
+    pdo_sqlite \
+    pdo_pgsql \
+    pcntl \
+    opcache \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN curl -L https://github.com/phpredis/phpredis/archive/refs/tags/6.3.0.tar.gz -o redis.tar.gz \
+    && mkdir -p /usr/src/php/ext/redis \
+    && tar -xzf redis.tar.gz --strip 1 -C /usr/src/php/ext/redis \
+    && docker-php-ext-install redis \
+    && rm redis.tar.gz
+
+# ---- Set timezone to Singapore (GMT+8) ----
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# ---- Install Composer ----
+RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+
+# ---- Copy Laravel application files ----
+COPY ./src/app ./app
+COPY ./src/lang ./lang
+COPY ./src/bootstrap ./bootstrap
+COPY ./src/config ./config
+COPY ./src/database ./database
+COPY ./src/routes ./routes
+COPY ./src/resources/views ./resources/views
+COPY ./src/storage ./storage
+COPY ./src/composer.json ./composer.json
+COPY ./src/composer.lock ./composer.lock
+COPY ./src/artisan ./artisan
+COPY ./src/phpunit.xml ./phpunit.xml
+COPY ./src/mock-api.php ./mock-api.php
+
+
+# ---- Copy built frontend assets from frontend stage ----
+COPY --from=frontend /home/node/public/build ./public/build
+
+# ---- Copy public assets ----
+COPY ./src/public/index.php ./public/index.php
+COPY ./src/public/robots.txt ./public/robots.txt
+COPY ./src/public/.htaccess ./public/.htaccess
+
+# ---- Install production PHP dependencies ----
+RUN composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader
+
+# ---- Set up storage and cache directories ----
+RUN mkdir -p storage/framework/{sessions,views,cache} \
+    && mkdir -p storage/logs \
+    && mkdir -p bootstrap/cache \
+    && chown -R www-data:www-data /var/www \
+    && chmod -R 775 storage bootstrap/cache
+
+# ---- Configure PHP for production ----
+RUN cp "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini" \
+    && sed -i 's/variables_order = "GPCS"/variables_order = "EGPCS"/' "$PHP_INI_DIR/php.ini" \
+    && echo "opcache.enable=1" >> "$PHP_INI_DIR/php.ini" \
+    && echo "opcache.memory_consumption=256" >> "$PHP_INI_DIR/php.ini" \
+    && echo "opcache.max_accelerated_files=20000" >> "$PHP_INI_DIR/php.ini" \
+    && echo "opcache.validate_timestamps=0" >> "$PHP_INI_DIR/php.ini" \
+    && echo "date.timezone=Asia/Singapore" >> "$PHP_INI_DIR/php.ini"
+
+# ---- Pre-warm Laravel caches (will need .env at runtime) ----
+# Note: These commands may fail without proper .env, but we'll handle that at startup
+RUN php artisan config:clear || true \
+    && php artisan route:clear || true \
+    && php artisan view:clear || true \
+    && php artisan package:discover --ansi || true
+
+# ---- Configure cron for Laravel scheduler ----
+RUN echo "* * * * * www-data cd /var/www && /usr/local/bin/php artisan schedule:run >> /var/log/cron.log 2>&1" \
+    > /etc/cron.d/laravel-scheduler \
+    && chmod 0644 /etc/cron.d/laravel-scheduler \
+    && crontab /etc/cron.d/laravel-scheduler \
+    && touch /var/log/cron.log \
+    && chown www-data:www-data /var/log/cron.log
+
+# ---- Create supervisor config for managing processes ----
+RUN echo "[supervisord]" > /etc/supervisor/conf.d/supervisord.conf \
+    && echo "nodaemon=true" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "user=root" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "[program:octane]" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "command=/usr/local/bin/php artisan octane:frankenphp --host=0.0.0.0 --port=80 --workers=4 --max-requests=500" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "directory=/var/www" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "user=root" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "autostart=true" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "autorestart=true" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "stdout_logfile=/var/log/octane.log" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "stderr_logfile=/var/log/octane-error.log" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "[program:cron]" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "command=/usr/sbin/cron -f" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "autostart=true" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "autorestart=true" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "stdout_logfile=/var/log/cron.log" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "stderr_logfile=/var/log/cron-error.log" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "# TODO: REMOVE THIS ONCE REAL API IS AVAILABLE - TEMPORARY MOCK API SERVER" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "[program:mock-api]" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "command=/usr/local/bin/php -S 0.0.0.0:8888 mock-api.php" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "directory=/var/www" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "user=www-data" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "autostart=true" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "autorestart=true" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "stdout_logfile=/var/log/mock-api.log" >> /etc/supervisor/conf.d/supervisord.conf \
+    && echo "stderr_logfile=/var/log/mock-api-error.log" >> /etc/supervisor/conf.d/supervisord.conf
+
+# ---- Create entrypoint script ----
+RUN echo '#!/bin/bash' > /entrypoint.sh \
+    && echo 'set -e' >> /entrypoint.sh \
+    && echo '' >> /entrypoint.sh \
+    && echo '# Wait for database if needed' >> /entrypoint.sh \
+    && echo 'if [ -f /var/www/.env ]; then' >> /entrypoint.sh \
+    && echo '    echo "Environment file found, warming caches..."' >> /entrypoint.sh \
+    && echo '    php artisan config:cache' >> /entrypoint.sh \
+    && echo '    php artisan route:cache' >> /entrypoint.sh \
+    && echo '    php artisan view:cache' >> /entrypoint.sh \
+    && echo 'fi' >> /entrypoint.sh \
+    && echo '' >> /entrypoint.sh \
+    && echo '# Start queue worker' >> /entrypoint.sh \
+    && echo 'php artisan queue:work --tries=1 --timeout=370 &' >> /entrypoint.sh \
+    && echo '' >> /entrypoint.sh \
+    && echo '# Start supervisor to manage Octane + Cron' >> /entrypoint.sh \
+    && echo 'exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf' >> /entrypoint.sh \
+    && chmod +x /entrypoint.sh
+
+# ---- Expose ports ----
+EXPOSE 80
+EXPOSE 443
+EXPOSE 443/udp
+
+# ---- Health check ----
+HEALTHCHECK --interval=30s --timeout=3s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost/api/health || exit 1
+
+# ---- Start the application ----
+ENTRYPOINT ["/entrypoint.sh"]
