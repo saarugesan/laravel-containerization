@@ -1,0 +1,55 @@
+FROM dunglas/frankenphp:1-php8.3-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV OCTANE_BINARY=/usr/local/bin/frankenphp
+
+# Set working directory
+WORKDIR /var/www
+
+# 2. Install necessary system dependencies and PHP extensions
+# FrankenPHP uses 'install-php-extensions' for easy setup
+RUN apt-get update && apt-get install -y \
+    curl \
+    gnupg \
+    unzip \
+    && install-php-extensions \
+    mbstring \
+    xml \
+    curl \
+    zip \
+    gd \
+    bcmath \
+    intl \
+    pdo_sqlite \
+    pdo_pgsql \
+    pcntl \
+    redis
+
+
+
+# 3. Install Node.js 22.x (For React/Vite)
+RUN curl -sL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs
+
+# 4. Install Composer
+RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+
+# 5. Set permissions (FrankenPHP uses 'www-data')
+RUN mkdir -p /var/www/storage /var/www/bootstrap/cache \
+    && chown -R www-data:www-data /var/www
+
+RUN sed -i 's/variables_order = "GPCS"/variables_order = "EGPCS"/' "$PHP_INI_DIR/php.ini-development" && \
+    cp "$PHP_INI_DIR/php.ini-development" "$PHP_INI_DIR/php.ini"
+
+# 6. Copy and setup entrypoint script
+COPY docker-entrypoint.dev.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# 7. Expose the standard ports
+EXPOSE 80
+EXPOSE 443
+EXPOSE 443/udp
+EXPOSE 5173
+
+# 8. Use entrypoint script to install dependencies before starting the server
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
