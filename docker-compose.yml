@@ -1,9 +1,9 @@
 services:
-  csp-dashboard-app:
+  app:
     build:
       context: .
       dockerfile: Dockerfile.dev
-    container_name: csp-dashboard-app
+    container_name: ${COMPOSE_PROJECT_NAME:-app}
     environment:
           - SERVER_NAME=:80        # Disables HTTPS
           - OCTANE_SERVER=frankenphp
