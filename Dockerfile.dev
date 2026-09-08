@@ -41,6 +41,8 @@ RUN mkdir -p /var/www/storage /var/www/bootstrap/cache \
 RUN sed -i 's/variables_order = "GPCS"/variables_order = "EGPCS"/' "$PHP_INI_DIR/php.ini-development" && \
     cp "$PHP_INI_DIR/php.ini-development" "$PHP_INI_DIR/php.ini"
 
+COPY docker/php/local.ini $PHP_INI_DIR/conf.d/99-custom.ini
+
 # 6. Copy and setup entrypoint script
 COPY docker-entrypoint.dev.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
